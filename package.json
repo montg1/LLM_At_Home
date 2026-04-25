@@ -1,0 +1,6 @@
+{
+    "name": "llm-at-home",
+    "version": "1.0.0",
+    "description": "Chat frontend for local LLM via LM Studio + Cloudflare Tunnel",
+    "private": true
+}
