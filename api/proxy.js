@@ -1,7 +1,8 @@
-// Vercel Serverless Function: CORS Proxy for LM Studio API
-// Handles both regular and streaming responses
+const https = require('https');
+const http = require('http');
+const { URL } = require('url');
 
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
     // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -17,56 +18,53 @@ export default async function handler(req, res) {
     }
 
     try {
-        const headers = { 'Content-Type': 'application/json' };
-        if (req.headers['authorization']) {
-            headers['Authorization'] = req.headers['authorization'];
-        }
+        const target = new URL(targetUrl);
+        const isHttps = target.protocol === 'https:';
+        const httpModule = isHttps ? https : http;
 
-        const fetchOptions = {
+        const options = {
             method: req.method,
-            headers,
+            headers: {
+                'Content-Type': req.headers['content-type'] || 'application/json',
+            },
         };
 
-        if (req.method === 'POST' && req.body) {
-            fetchOptions.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+        if (req.headers['authorization']) {
+            options.headers['Authorization'] = req.headers['authorization'];
         }
 
-        const response = await fetch(targetUrl, fetchOptions);
-
-        // Check if streaming response
-        const contentType = response.headers.get('content-type') || '';
-        const isStream = contentType.includes('text/event-stream');
-
-        // Forward status
-        res.status(response.status);
-        res.setHeader('Content-Type', contentType || 'application/json');
-
-        if (isStream) {
-            // Stream the response
-            res.setHeader('Cache-Control', 'no-cache');
-            res.setHeader('Connection', 'keep-alive');
-            res.setHeader('Transfer-Encoding', 'chunked');
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            try {
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    const chunk = decoder.decode(value, { stream: true });
-                    res.write(chunk);
-                }
-            } catch (e) {
-                // Client disconnected or stream error
-            } finally {
-                res.end();
+        const proxyReq = httpModule.request(targetUrl, options, (proxyRes) => {
+            // Forward status and headers
+            res.status(proxyRes.statusCode);
+            
+            const contentType = proxyRes.headers['content-type'];
+            if (contentType) res.setHeader('Content-Type', contentType);
+            
+            if (contentType && contentType.includes('text/event-stream')) {
+                res.setHeader('Cache-Control', 'no-cache');
+                res.setHeader('Connection', 'keep-alive');
             }
-        } else {
-            const data = await response.text();
-            res.send(data);
+
+            // Pipe the response
+            proxyRes.pipe(res);
+        });
+
+        proxyReq.on('error', (err) => {
+            console.error('Proxy error:', err);
+            if (!res.headersSent) {
+                res.status(502).json({ error: 'Proxy error: ' + err.message });
+            }
+        });
+
+        // Forward request body if it exists
+        if (req.method === 'POST') {
+            const body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+            proxyReq.write(body);
         }
+        
+        proxyReq.end();
     } catch (err) {
-        res.status(502).json({ error: 'Proxy error: ' + err.message });
+        console.error('Handler error:', err);
+        res.status(500).json({ error: 'Internal error: ' + err.message });
     }
-}
+};
